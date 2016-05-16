@@ -1,0 +1,258 @@
+#!/usr/bin/perl
+#
+# To crop a specified bounding box from every page of a PS file, and 
+# transform the bounding box to a desired size+location.
+#
+#
+# by Lee Sau Dan (c) 1998 
+#
+
+sub parse_length {
+    local $_ = $_[0];
+    local $factor=1.0;
+    if (s/in$//) { 
+	$factor=72.0; 
+    } elsif (s/mm$//) { 
+	$factor=2.834645669291339;
+    } elsif (s/cm$//) {
+	$factor=28.34645669291339;
+    } elsif (s/pt$//) {
+	$factor=1.0;
+    }
+    if (/^[+-]?[0-9]*[.]?[0-9]*$/) {
+	return $_ * $factor;
+    } else {
+	die "invalid coordinate: $_\n";
+    }
+}
+
+sub parse_coor {
+    local ($x,$y) = split (',',$_[0]);
+    $x = parse_length ($x);
+    $y = parse_length ($y);
+    return ($x,$y);
+}
+
+
+%papersizes = (
+	       'a0', "2380 3368",
+	       'a1', "1684 2380",
+	       'a2', "1190 1684",
+	       'a3', "842 1190",
+	       'a4', "595 842",
+	       'a5', "421 595",
+	       'a6', "297 421",
+	       'a7', "210 297",
+	       'a8', "148 210",
+	       'a9', "105 148",
+	       'a10', "74 105",
+	       'b0', "2836 4008",
+	       'b1', "2004 2836",
+	       'b2', "1418 2004",
+	       'b3', "1002 1418",
+	       'b4', "709 1002",
+	       'b5', "501 709",
+	       'letter', "612 792",
+	       );
+
+
+sub parse_bbox {
+    if ($_[0] =~ /^([^-]+)-(.+)$/) {
+	local ($ll,$ur) = ($1,$2);
+	local (@ll,@ur);
+	@ll = parse_coor ($ll);
+	@ur = parse_coor ($ur);
+	return (@ll,@ur);
+    } elsif ($_[0] =~ /^([^:]+):(.*)$/) {
+	local ($type,$margin) = ($1,$2);
+	local ($llx,$lly,$urx,$ury)=(0,0,0,0);
+
+	my $size = $papersizes{$type};
+	if (!defined($size)) {
+	    die "Unknown paper type: $type\n";
+	}
+        ($urx, $ury) = split(' ', $size);
+
+	$margin = parse_length ($margin);
+	$llx+=$margin;
+	$lly+=$margin;
+	$urx-=$margin;
+	$ury-=$margin;
+
+	return ($llx,$lly,$urx,$ury);
+    } else {
+	die "Bad bounding box specification: $_[0]\n";
+    }
+}
+
+#
+# main program begins here!
+#
+
+while ($#ARGV >= 0 && $ARGV[0]=~/^-(.+)$/) {
+    local ($opt)=$1;
+    if ($opt eq 'b') { $draw_bb = 1; }
+    elsif ($opt =~ /^rr?r?$/) { $rotate=length ($opt); }
+    else { die "Unknown option: -$opt\n"; }
+    shift;
+}
+
+
+if ($#ARGV < 1) {
+    die "Usage: $0 [options] old_bounding_box new_bounding_box [input_files]
+
+\t where bounding_box is one of the following formats
+\t   1)  llx,lly-urx,ury
+\t   2)  paper_type:[margins]
+\t   3)  auto (determined from DSC comment %%BoundingBox)
+\t   4)  page (determined from DSC comment %%PageBoundingBox)
+
+\t Lengths are in units of points ('pt') if not nspecified.
+\t Other valid units are 'in', 'cm' and 'mm'.
+
+\t Paper_type may be one of 'a4' and 'letter'.
+\t
+\t Options:
+\t\t-b\tdraw an outline for the output bounding box
+\t\t-r\trotate output by 90 degrees counterclockwise
+\t\t-rr\trotate output by 180 degrees counterclockwise
+\t\t-rrr\trotate output by 90 degrees clockwise
+";
+}
+
+($old_bbox_spec,$new_bbox_spec) = @ARGV[0..1];
+shift;
+shift;
+
+@old_bbox = parse_bbox ($old_bbox_spec)
+    unless $old_bbox_spec eq 'auto'
+    || $old_bbox_spec eq 'page';
+@new_bbox = parse_bbox ($new_bbox_spec);
+
+
+sub compute_transformations {
+my ($old_width, $old_height);
+my ($new_width, $new_height);
+my ($xscale, $yscale);
+my ($xtrans, $ytrans);
+
+$old_width = $old_bbox[2]-$old_bbox[0];
+$old_height= $old_bbox[3]-$old_bbox[1];
+$new_width = $new_bbox[2]-$new_bbox[0];
+$new_height= $new_bbox[3]-$new_bbox[1];
+
+$xscale = $new_width / $old_width;
+$yscale = $new_height / $old_height;
+
+$xtrans = $new_bbox[0] - $xscale * $old_bbox[0];
+$ytrans = $new_bbox[1] - $yscale * $old_bbox[1];
+
+$xform = sprintf ("[%f 0 0 %f %f %f]concat\n",
+		  $xscale,$yscale,$xtrans,$ytrans);
+
+if ($rotate == 1) {
+    $rot = sprintf("[0 1 -1 0 %f %f]concat\n",
+		   $new_height+$new_bbox[0]+$new_bbox[1],
+		   $new_bbox[1]-$new_bbox[0]);
+} elsif ($rotate == 2) {
+    $rot = sprintf("[-1 0 0 -1 %f %f]concat\n",
+		   $new_width+2*$new_bbox[0],
+		   $new_height+2*$new_bbox[1]);
+} elsif ($rotate == 3) {
+    $rot = sprintf("[0 -1 1 0 %f %f]concat\n",
+		   $new_bbox[0]-$new_bbox[1],
+		   $new_width+$new_bbox[0]+$new_bbox[1]);
+}
+
+$clipping = sprintf (
+"newpath %d %d moveto %f 0 rlineto 0 %f rlineto 
+%f neg 0 rlineto closepath clip %s newpath
+",
+		     $new_bbox[0],$new_bbox[1],
+		     $new_width,$new_height,$new_width,
+		     $draw_bb? "stroke":"");
+} #end sub
+
+
+
+while (<>) {
+  if ($include_level <= 0) {
+    if (/^%%Page:/) {
+	if ($not_first) {
+	    print "grestore\n";
+	} else {
+	    $not_first=1;
+	}
+	print;
+	$_ = undef;
+	if ($old_bbox_spec eq 'page') { # per-page auto bounding box
+	    @old_bbox = @doc_old_bbox;
+	    $xform = undef; # force recomputation of transformation
+	    while (<>) {
+		if (/^%%PageBoundingBox:(.*)$/) {
+		    print "%%OldPageBoundingBox:$1\n";
+		    if ($1 =~ /^.s*([+-]?[0-9]+)\s*([+-]?[0-9]+)\s*([+-]?[0-9]+)\s*([+-]?[0-9]+)\s*$/) {
+			@old_bbox = ($1, $2, $3, $4);
+		    }
+		} elsif (/^%%/) {
+		    print;
+		} else {
+		    last;
+		}
+	    }
+	}
+	print "gsave ";
+	compute_transformations() unless $xform;
+	print $rot if $rot;
+	print $clipping;
+	print $xform;
+	print if defined($_);
+    } elsif (/^%%Trailer/) {
+	print "grestore\n" if ($not_first) ;
+	print;
+    } elsif (/^%%Creator:(.*)$/) {
+	print "%%Creator: pscrop -- by Lee Sau Dan (c) 1998\n";
+	print "%%%%OldCreator: $1\n";
+	$creatored=1;
+    } elsif (/^%%EndComments/) {
+	print "%%Creator: pscrop -- by Lee Sau Dan (c) 1998\n"
+	    if !$creatored;
+	$creatored=1;
+	print;
+    } elsif (/^%%BoundingBox:(.*)$/) {
+	print "%%BoundingBox: ", join(' ', @new_bbox), "\n";
+	print "%%%%OldBoundingBox:$1\n";
+	if ($old_bbox_spec eq 'auto' || $old_bbox_spec eq 'page') {
+	    if ($1 =~ /^.s*([+-]?[0-9]+)\s*([+-]?[0-9]+)\s*([+-]?[0-9]+)\s*([+-]?[0-9]+)\s*$/) {
+		@doc_old_bbox =
+		@old_bbox = ($1, $2, $3, $4);
+	    } else {
+		die "cannot determining bounding box "
+		    . "-- try specifying manually\n";
+	    }
+	}
+    } elsif (/^%%EndPageSetup/) {
+	print;
+    } elsif (/^%%BeginDocument/) {
+	print;
+	++$include_level;
+    } else {
+	print;
+    }
+  } else {
+    if (/^%%BeginDocument/) {
+	print;
+	++$include_level;
+    } elsif (/^%%EndDocument/) {
+	--$include_level;
+	print;
+    } else {
+	print;
+    }
+  }
+}
+
+
+
+
+#end
